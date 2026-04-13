@@ -1,4 +1,4 @@
-streamlit==1.35.0
+streamlit==1.44.0
 supabase==2.5.0
 pypdf==4.3.1
 pandas==2.2.2
