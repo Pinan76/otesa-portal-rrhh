@@ -680,21 +680,27 @@ with tab7:
     st.caption("Documentos subidos por los empleados desde la app (PDFs e imágenes).")
 
     try:
-        # Obtener todos los documentos personales con datos del empleado
         resp_docs = supabase.table("publicaciones") \
-            .select("id, titulo, archivo_url, created_at, activo, empleado_id, usuarios!empleado_id(nombre_completo, rfc_empleado, area)") \
+            .select("id, titulo, archivo_url, created_at, empleado_id") \
             .eq("empresa_id", empresa_id) \
             .eq("tipo", "DOCUMENTO_PERSONAL") \
             .order("created_at", desc=True) \
             .execute()
 
         if resp_docs.data:
-            # Construir dataframe
+            # Obtener datos de empleados en una sola consulta
+            empleado_ids = list({doc["empleado_id"] for doc in resp_docs.data if doc.get("empleado_id")})
+            resp_usuarios = supabase.table("usuarios") \
+                .select("id, nombre_completo, rfc_empleado, area") \
+                .in_("id", empleado_ids) \
+                .execute()
+
+            usuarios_map = {u["id"]: u for u in (resp_usuarios.data or [])}
+
             docs_lista = []
             for doc in resp_docs.data:
-                usuario_data = doc.get("usuarios") or {}
+                usuario_data = usuarios_map.get(doc.get("empleado_id"), {})
                 docs_lista.append({
-                    "id":       doc["id"],
                     "Empleado": usuario_data.get("nombre_completo", "Desconocido"),
                     "RFC":      usuario_data.get("rfc_empleado", "-"),
                     "Área":     usuario_data.get("area", "-"),
@@ -705,24 +711,18 @@ with tab7:
 
             df_docs = pd.DataFrame(docs_lista)
 
-            # Métricas
-            total_docs   = len(df_docs)
-            empleados_con_docs = df_docs["Empleado"].nunique()
-
             m1, m2 = st.columns(2)
-            m1.metric("Total documentos", total_docs)
-            m2.metric("Empleados con documentos", empleados_con_docs)
+            m1.metric("Total documentos", len(df_docs))
+            m2.metric("Empleados con documentos", df_docs["Empleado"].nunique())
 
             st.divider()
 
-            # Filtro por empleado
             empleados_lista = ["Todos"] + sorted(df_docs["Empleado"].unique().tolist())
             filtro_empleado = st.selectbox("Filtrar por empleado", empleados_lista)
 
             if filtro_empleado != "Todos":
                 df_docs = df_docs[df_docs["Empleado"] == filtro_empleado]
 
-            # Mostrar documentos
             for _, row in df_docs.iterrows():
                 with st.expander(f"📄 {row['Título']} — {row['Empleado']} ({row['Fecha']})"):
                     col1, col2 = st.columns([2, 1])
@@ -731,7 +731,6 @@ with tab7:
                         st.write(f"**RFC:** {row['RFC']}")
                         st.write(f"**Área:** {row['Área']}")
                         st.write(f"**Fecha:** {row['Fecha']}")
-
                     with col1:
                         url = row["URL"]
                         if url:
