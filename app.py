@@ -562,6 +562,116 @@ with tab5:
                     st.error(f"Error: {e}")
 
     st.divider()
+    st.subheader("Carga masiva de personal")
+    st.caption("Sube un archivo Excel o CSV con los datos de todos los empleados de una vez.")
+
+    # Botón para descargar plantilla
+    plantilla = pd.DataFrame(columns=[
+        "nombre_completo", "rfc_empleado", "email", "area",
+        "puesto", "curp", "nss", "rol"
+    ])
+    csv_plantilla = plantilla.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "📥 Descargar plantilla CSV",
+        data=csv_plantilla,
+        file_name="plantilla_empleados.csv",
+        mime="text/csv"
+    )
+
+    archivo_masivo = st.file_uploader(
+        "Sube el archivo con empleados (CSV o Excel)",
+        type=["csv", "xlsx"],
+        key="carga_masiva_personal"
+    )
+
+    if archivo_masivo:
+        try:
+            if archivo_masivo.name.endswith(".csv"):
+                df_nuevos = pd.read_csv(archivo_masivo)
+            else:
+                df_nuevos = pd.read_excel(archivo_masivo)
+
+            st.info(f"📄 {len(df_nuevos)} empleado(s) detectados en el archivo")
+            st.dataframe(df_nuevos, use_container_width=True)
+
+            if st.button("🚀 Cargar Empleados", type="primary", key="btn_carga_masiva"):
+                resultados_masivos = []
+                progress = st.progress(0)
+                total    = len(df_nuevos)
+
+                for i, fila in df_nuevos.iterrows():
+                    rfc    = str(fila.get("rfc_empleado", "")).upper().strip()
+                    nombre = str(fila.get("nombre_completo", "")).upper().strip()
+                    email  = str(fila.get("email", "")).lower().strip()
+                    area   = str(fila.get("area", "")).upper().strip()
+
+                    if not rfc or not nombre or not email or not area:
+                        resultados_masivos.append({
+                            "Nombre": nombre,
+                            "RFC":    rfc,
+                            "Estado": "⚠️ Faltan campos obligatorios"
+                        })
+                        progress.progress((i + 1) / total)
+                        continue
+
+                    # Verificar si ya existe
+                    check = supabase.table("usuarios") \
+                        .select("id") \
+                        .eq("rfc_empleado", rfc) \
+                        .eq("empresa_id", empresa_id) \
+                        .execute()
+
+                    if check.data:
+                        resultados_masivos.append({
+                            "Nombre": nombre,
+                            "RFC":    rfc,
+                            "Estado": "⚠️ RFC ya registrado"
+                        })
+                        progress.progress((i + 1) / total)
+                        continue
+
+                    # Insertar empleado
+                    nuevo = {
+                        "empresa_id":      empresa_id,
+                        "nombre_completo": nombre,
+                        "rfc_empleado":    rfc,
+                        "email":           email,
+                        "area":            area,
+                        "rol":             str(fila.get("rol", "empleado")).lower().strip() or "empleado",
+                        "es_admin":        False,
+                        "estado":          "ACTIVO",
+                    }
+                    if pd.notna(fila.get("curp")) and str(fila.get("curp", "")).strip():
+                        nuevo["curp"] = str(fila["curp"]).upper().strip()
+                    if pd.notna(fila.get("nss")) and str(fila.get("nss", "")).strip():
+                        nuevo["nss"] = str(fila["nss"]).strip()
+                    if pd.notna(fila.get("puesto")) and str(fila.get("puesto", "")).strip():
+                        nuevo["puesto"] = str(fila["puesto"]).upper().strip()
+
+                    try:
+                        supabase.table("usuarios").insert(nuevo).execute()
+                        resultados_masivos.append({
+                            "Nombre": nombre,
+                            "RFC":    rfc,
+                            "Estado": "✅ Registrado"
+                        })
+                    except Exception as e:
+                        resultados_masivos.append({
+                            "Nombre": nombre,
+                            "RFC":    rfc,
+                            "Estado": f"❌ Error: {e}"
+                        })
+
+                    progress.progress((i + 1) / total)
+
+                st.dataframe(pd.DataFrame(resultados_masivos), use_container_width=True)
+                registrados = sum(1 for r in resultados_masivos if "✅" in r["Estado"])
+                st.success(f"✅ {registrados} de {total} empleados registrados correctamente.")
+
+        except Exception as e:
+            st.error(f"Error leyendo archivo: {e}")
+
+    st.divider()
     st.subheader("Empleados registrados")
 
     try:
