@@ -25,7 +25,7 @@ from supabase import create_client, Client
 # CONFIGURACIÓN
 # ==========================================
 SUPABASE_URL      = "https://msiulyfrohijawawwmrf.supabase.co"
-SUPABASE_KEY      = st.secrets["SUPABASE_KEY"]  # anon key en secrets
+SUPABASE_KEY = st.secrets["SUPABASE_SERVICE_KEY"]
 PASSWORD_ADMIN    = st.secrets["PASSWORD_ADMIN"]
 RFC_EMPRESA       = "OTE2107019N1"
 BUCKET_RECIBOS    = "recibos-nomina"
