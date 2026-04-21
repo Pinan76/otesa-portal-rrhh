@@ -1,22 +1,22 @@
 # -*- coding: utf-8 -*-
 # ============================================================
 # OTESA - Portal Web de RRHH
-# Versión: 2.0 — Conectado a Supabase
+# Versión: 3.0 — Conectado a Supabase
 #
 # Funciones principales:
 #   1. Login con contraseña de admin
 #   2. Carga masiva de PDFs de nómina
-#   3. Procesamiento automático — lee RFC y asigna a empleado
-#   4. Panel de estado de firmas
-#   5. Envío de alertas a empleados pendientes
-#   6. Bitácora de envíos
+#   3. Panel de estado de firmas
+#   4. Envío de alertas a empleados pendientes
+#   5. Bitácora de envíos
+#   6. Alta de nuevo personal
+#   7. Resultados de encuestas (conteo + detalle por persona y depto)
 # ============================================================
 
 import streamlit as st
 import pandas as pd
 import re
 import io
-import os
 from datetime import datetime
 from pypdf import PdfReader
 from supabase import create_client, Client
@@ -24,11 +24,11 @@ from supabase import create_client, Client
 # ==========================================
 # CONFIGURACIÓN
 # ==========================================
-SUPABASE_URL      = "https://msiulyfrohijawawwmrf.supabase.co"
-SUPABASE_KEY = st.secrets["SUPABASE_SERVICE_KEY"]
-PASSWORD_ADMIN    = st.secrets["PASSWORD_ADMIN"]
-RFC_EMPRESA       = "OTE2107019N1"
-BUCKET_RECIBOS    = "recibos-nomina"
+SUPABASE_URL       = "https://msiulyfrohijawawwmrf.supabase.co"
+SUPABASE_KEY       = st.secrets["SUPABASE_SERVICE_KEY"]
+PASSWORD_ADMIN     = st.secrets["PASSWORD_ADMIN"]
+RFC_EMPRESA        = "OTE2107019N1"
+BUCKET_RECIBOS     = "recibos-nomina"
 CARPETA_ORIGINALES = "originales"
 
 st.set_page_config(
@@ -56,13 +56,11 @@ if "admin" not in st.session_state:
 # FUNCIONES DE PROCESAMIENTO DE PDF
 # ==========================================
 def extraer_datos_pdf(pdf_bytes: bytes) -> dict:
-    """Extrae RFC, nombre y datos del recibo desde un PDF de CONTPAQi."""
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
         text   = reader.pages[0].extract_text()
         lines  = text.split('\n')
 
-        # --- RFC del empleado ---
         todos_rfcs = re.findall(r'[A-Z&Ñ]{3,4}\s*\d{6}\s*[A-Z0-9]{3}', text)
         rfc_final  = "DESCONOCIDO"
         for rfc in todos_rfcs:
@@ -71,7 +69,6 @@ def extraer_datos_pdf(pdf_bytes: bytes) -> dict:
                 rfc_final = clean
                 break
 
-        # --- Nombre del empleado ---
         nombre_final = "Colaborador"
         if rfc_final != "DESCONOCIDO":
             idx_rfc = -1
@@ -91,9 +88,8 @@ def extraer_datos_pdf(pdf_bytes: bytes) -> dict:
                             nombre_final = cand
                             break
 
-        # --- Semana y año ---
-        semana = 0
-        año    = datetime.now().year
+        semana  = 0
+        año     = datetime.now().year
         periodo = ""
 
         match_periodo = re.search(r'Periodo:\s*(\d+)\s+\d+\s+Semanal\s+(\d{2}/\w+/\d{4})', text)
@@ -103,7 +99,6 @@ def extraer_datos_pdf(pdf_bytes: bytes) -> dict:
             año     = int(fecha_s.split("/")[-1])
             periodo = f"Semana_{semana}"
 
-        # --- Monto neto ---
         monto = 0.0
         match_neto = re.search(r'Neto del recibo\s*\$\s*([\d,]+\.\d{2})', text)
         if match_neto:
@@ -122,7 +117,6 @@ def extraer_datos_pdf(pdf_bytes: bytes) -> dict:
 
 
 def buscar_usuario_por_rfc(rfc: str, empresa_id: str) -> dict | None:
-    """Busca un usuario en Supabase por RFC y empresa."""
     try:
         resp = supabase.table("usuarios") \
             .select("id, nombre_completo, email, area") \
@@ -137,13 +131,12 @@ def buscar_usuario_por_rfc(rfc: str, empresa_id: str) -> dict | None:
 
 
 def subir_pdf_storage(pdf_bytes: bytes, nombre_archivo: str) -> str | None:
-    """Sube un PDF al bucket de Supabase Storage y regresa la URL pública."""
     try:
         path = f"{CARPETA_ORIGINALES}/{nombre_archivo}"
         supabase.storage.from_(BUCKET_RECIBOS).upload(
             path,
             pdf_bytes,
-            {"content-type": "application/pdf", "upsert": "true"}
+            file_options={"content-type": "application/pdf", "upsert": "true"}
         )
         url = supabase.storage.from_(BUCKET_RECIBOS).get_public_url(path)
         return url
@@ -153,7 +146,6 @@ def subir_pdf_storage(pdf_bytes: bytes, nombre_archivo: str) -> str | None:
 
 
 def crear_recibo_supabase(empresa_id: str, usuario_id: str, datos: dict, pdf_url: str, nombre_empleado: str) -> bool:
-    """Inserta un registro en la tabla recibos."""
     try:
         supabase.table("recibos").insert({
             "empresa_id":      empresa_id,
@@ -174,7 +166,6 @@ def crear_recibo_supabase(empresa_id: str, usuario_id: str, datos: dict, pdf_url
 
 
 def obtener_empresa(empresa_id: str) -> dict | None:
-    """Obtiene datos de la empresa."""
     try:
         resp = supabase.table("empresas") \
             .select("*") \
@@ -187,7 +178,6 @@ def obtener_empresa(empresa_id: str) -> dict | None:
 
 
 def obtener_status_recibos(empresa_id: str) -> pd.DataFrame:
-    """Obtiene el status de todos los recibos de la empresa."""
     try:
         resp = supabase.table("recibos") \
             .select("nombre_empleado, rfc, periodo, semana, monto, estado, fecha_firma") \
@@ -206,7 +196,6 @@ def obtener_status_recibos(empresa_id: str) -> pd.DataFrame:
 
 
 def enviar_alerta_resend(email_empleado: str, nombre_empleado: str, periodo: str) -> bool:
-    """Envía alerta de recibo pendiente via Resend."""
     import urllib.request
     import json
 
@@ -256,7 +245,6 @@ with st.sidebar:
                 st.error("Contraseña incorrecta")
     else:
         st.success("✅ Sesión activa")
-        # Selector de empresa (para futuro multiempresa)
         st.divider()
         empresa_id_input = st.text_input(
             "ID de empresa",
@@ -288,7 +276,14 @@ nombre_empresa = empresa["nombre_comercial"] if empresa else "Empresa"
 st.title(f"📋 Panel RRHH — {nombre_empresa}")
 st.divider()
 
-tab1, tab2, tab3, tab4 = st.tabs(["📂 Carga Masiva", "🚨 Estado de Firmas", "📧 Alertas", "📊 Bitácora"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "📂 Carga Masiva",
+    "🚨 Estado de Firmas",
+    "📧 Alertas",
+    "📊 Bitácora",
+    "👤 Alta de Personal",
+    "🗳️ Encuestas"
+])
 
 # ==========================================
 # TAB 1 — CARGA MASIVA
@@ -308,25 +303,23 @@ with tab1:
 
         if st.button("🚀 Procesar y Subir Recibos", type="primary"):
             resultados = []
-            progress = st.progress(0)
-            status   = st.empty()
+            progress   = st.progress(0)
+            status     = st.empty()
 
             for i, archivo in enumerate(uploaded_files):
                 status.text(f"Procesando {archivo.name}...")
                 pdf_bytes = archivo.read()
 
-                # 1. Extraer datos del PDF
                 datos = extraer_datos_pdf(pdf_bytes)
                 if "error" in datos:
                     resultados.append({
-                        "Archivo": archivo.name,
-                        "Estado":  "❌ Error al leer PDF",
-                        "RFC":     "-",
+                        "Archivo":  archivo.name,
+                        "Estado":   "❌ Error al leer PDF",
+                        "RFC":      "-",
                         "Empleado": "-",
                     })
                     continue
 
-                # 2. Buscar empleado en Supabase
                 usuario = buscar_usuario_por_rfc(datos["rfc"], empresa_id)
                 if not usuario:
                     resultados.append({
@@ -337,7 +330,6 @@ with tab1:
                     })
                     continue
 
-                # 3. Subir PDF a Storage
                 pdf_url = subir_pdf_storage(pdf_bytes, archivo.name)
                 if not pdf_url:
                     resultados.append({
@@ -348,7 +340,6 @@ with tab1:
                     })
                     continue
 
-                # 4. Crear registro en tabla recibos
                 ok = crear_recibo_supabase(
                     empresa_id,
                     usuario["id"],
@@ -386,8 +377,8 @@ with tab2:
     df_status = obtener_status_recibos(empresa_id)
 
     if not df_status.empty:
-        total     = len(df_status)
-        firmados  = len(df_status[df_status["estado"] == "✅ FIRMADO"])
+        total      = len(df_status)
+        firmados   = len(df_status[df_status["estado"] == "✅ FIRMADO"])
         pendientes = total - firmados
 
         m1, m2, m3 = st.columns(3)
@@ -428,11 +419,11 @@ with tab3:
     df_status = obtener_status_recibos(empresa_id)
 
     if not df_status.empty:
-        pendientes = df_status[df_status["estado"] == "❌ PENDIENTE"]
+        pendientes_df = df_status[df_status["estado"] == "❌ PENDIENTE"]
 
-        if not pendientes.empty:
-            st.warning(f"⚠️ {len(pendientes)} empleado(s) con recibos pendientes")
-            st.dataframe(pendientes[["nombre_empleado", "rfc", "periodo"]].rename(columns={
+        if not pendientes_df.empty:
+            st.warning(f"⚠️ {len(pendientes_df)} empleado(s) con recibos pendientes")
+            st.dataframe(pendientes_df[["nombre_empleado", "rfc", "periodo"]].rename(columns={
                 "nombre_empleado": "Empleado",
                 "rfc":             "RFC",
                 "periodo":         "Período",
@@ -441,12 +432,10 @@ with tab3:
             st.divider()
 
             if st.button("📧 Enviar Alerta a Todos los Pendientes", type="primary"):
-                # Obtener emails de los empleados pendientes
-                rfcs_pendientes = pendientes["rfc"].tolist()
                 enviados = 0
                 errores  = 0
 
-                for _, row in pendientes.iterrows():
+                for _, row in pendientes_df.iterrows():
                     try:
                         resp = supabase.table("usuarios") \
                             .select("email, nombre_completo") \
@@ -498,3 +487,180 @@ with tab4:
             st.info("No hay registros en la bitácora.")
     except Exception as e:
         st.error(f"Error cargando bitácora: {e}")
+
+
+# ==========================================
+# TAB 5 — ALTA DE PERSONAL
+# ==========================================
+with tab5:
+    st.subheader("Alta de nuevo personal")
+    st.caption("Registra nuevos empleados en el sistema. Podrán registrarse en la app usando su RFC.")
+
+    with st.form("form_alta_personal"):
+        col1, col2 = st.columns(2)
+
+        with col1:
+            nombre_completo = st.text_input("Nombre completo *", placeholder="JUAN PEREZ GARCIA")
+            rfc_nuevo       = st.text_input("RFC *", placeholder="PEGJ800101ABC")
+            email_nuevo     = st.text_input("Correo electrónico *", placeholder="juan@ejemplo.com")
+            area_nueva      = st.text_input("Área / Departamento *", placeholder="PRODUCCION")
+
+        with col2:
+            curp_nuevo    = st.text_input("CURP", placeholder="PEGJ800101HGRRCN09")
+            nss_nuevo     = st.text_input("NSS (IMSS)", placeholder="12345678901")
+            puesto_nuevo  = st.text_input("Puesto", placeholder="OPERADOR")
+            fecha_ingreso = st.date_input("Fecha de ingreso", value=datetime.now())
+
+        rol_nuevo = st.selectbox("Rol", ["empleado", "supervisor", "admin"])
+        es_admin  = rol_nuevo == "admin"
+
+        submitted = st.form_submit_button("👤 Registrar Empleado", type="primary")
+
+        if submitted:
+            if not nombre_completo or not rfc_nuevo or not email_nuevo or not area_nueva:
+                st.error("⚠️ Los campos marcados con * son obligatorios.")
+            else:
+                try:
+                    check = supabase.table("usuarios") \
+                        .select("id") \
+                        .eq("rfc_empleado", rfc_nuevo.upper().strip()) \
+                        .eq("empresa_id", empresa_id) \
+                        .execute()
+
+                    if check.data:
+                        st.error(f"⚠️ El RFC {rfc_nuevo.upper()} ya está registrado en el sistema.")
+                    else:
+                        nuevo_usuario = {
+                            "empresa_id":      empresa_id,
+                            "nombre_completo": nombre_completo.upper().strip(),
+                            "rfc_empleado":    rfc_nuevo.upper().strip(),
+                            "email":           email_nuevo.lower().strip(),
+                            "area":            area_nueva.upper().strip(),
+                            "rol":             rol_nuevo,
+                            "es_admin":        es_admin,
+                            "estado":          "ACTIVO",
+                        }
+
+                        if curp_nuevo:
+                            nuevo_usuario["curp"] = curp_nuevo.upper().strip()
+                        if nss_nuevo:
+                            nuevo_usuario["nss"] = nss_nuevo.strip()
+                        if puesto_nuevo:
+                            nuevo_usuario["puesto"] = puesto_nuevo.upper().strip()
+
+                        resp_insert = supabase.table("usuarios").insert(nuevo_usuario).execute()
+
+                        if resp_insert.data:
+                            st.success(f"✅ Empleado **{nombre_completo.upper()}** registrado correctamente.")
+                            st.info("📱 El empleado podrá registrarse en la app usando su RFC.")
+                        else:
+                            st.error("❌ Error al registrar el empleado.")
+
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+    st.divider()
+    st.subheader("Empleados registrados")
+
+    try:
+        resp_empleados = supabase.table("usuarios") \
+            .select("nombre_completo, rfc_empleado, email, area, rol, estado, auth_user_id") \
+            .eq("empresa_id", empresa_id) \
+            .order("nombre_completo") \
+            .execute()
+
+        if resp_empleados.data:
+            df_empleados = pd.DataFrame(resp_empleados.data)
+            df_empleados["App"] = df_empleados["auth_user_id"].apply(
+                lambda x: "✅ Registrado" if x else "⏳ Pendiente"
+            )
+            df_empleados = df_empleados.drop(columns=["auth_user_id"])
+            st.dataframe(
+                df_empleados.rename(columns={
+                    "nombre_completo": "Nombre",
+                    "rfc_empleado":    "RFC",
+                    "email":           "Email",
+                    "area":            "Área",
+                    "rol":             "Rol",
+                    "estado":          "Estado",
+                }),
+                use_container_width=True
+            )
+            st.caption(f"Total: {len(df_empleados)} empleados")
+        else:
+            st.info("No hay empleados registrados.")
+    except Exception as e:
+        st.error(f"Error cargando empleados: {e}")
+
+
+# ==========================================
+# TAB 6 — ENCUESTAS
+# ==========================================
+with tab6:
+    st.subheader("Resultados de Encuestas")
+
+    try:
+        resp_encuestas = supabase.table("encuestas") \
+            .select("id, titulo, descripcion, fecha_fin, estado") \
+            .eq("empresa_id", empresa_id) \
+            .order("created_at", desc=True) \
+            .execute()
+
+        if resp_encuestas.data:
+            for encuesta in resp_encuestas.data:
+                with st.expander(f"📊 {encuesta['titulo']} — {encuesta['estado']}"):
+                    st.caption(encuesta.get("descripcion", ""))
+                    st.caption(f"Fecha de cierre: {encuesta.get('fecha_fin', 'Sin fecha')}")
+
+                    resp_votos = supabase.table("votos") \
+                        .select("voto, created_at, usuarios(nombre_completo, area, rfc_empleado)") \
+                        .eq("encuesta_id", encuesta["id"]) \
+                        .execute()
+
+                    if resp_votos.data:
+                        votos_lista = []
+                        for v in resp_votos.data:
+                            usuario_data = v.get("usuarios") or {}
+                            votos_lista.append({
+                                "Voto":       v["voto"],
+                                "Empleado":   usuario_data.get("nombre_completo", "Desconocido"),
+                                "RFC":        usuario_data.get("rfc_empleado", "-"),
+                                "Área":       usuario_data.get("area", "Sin área"),
+                                "Fecha Voto": v.get("created_at", "")[:10],
+                            })
+
+                        df_votos    = pd.DataFrame(votos_lista)
+                        total_votos = len(df_votos)
+
+                        conteo = df_votos["Voto"].value_counts().reset_index()
+                        conteo.columns = ["Opción", "Votos"]
+                        conteo["Porcentaje"] = (conteo["Votos"] / total_votos * 100).round(1).astype(str) + "%"
+
+                        st.metric("Total de votos", total_votos)
+
+                        col1, col2 = st.columns([2, 1])
+                        with col1:
+                            st.bar_chart(conteo.set_index("Opción")["Votos"])
+                        with col2:
+                            st.dataframe(conteo, use_container_width=True, hide_index=True)
+
+                        st.divider()
+
+                        st.markdown("**Votos por Departamento**")
+                        df_depto = df_votos.groupby(["Área", "Voto"]).size().reset_index(name="Cantidad")
+                        st.dataframe(df_depto, use_container_width=True, hide_index=True)
+
+                        st.divider()
+
+                        st.markdown("**Detalle por Persona**")
+                        st.dataframe(
+                            df_votos[["Empleado", "RFC", "Área", "Voto", "Fecha Voto"]],
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                    else:
+                        st.info("Sin votos registrados aún.")
+        else:
+            st.info("No hay encuestas registradas para esta empresa.")
+    except Exception as e:
+        st.error(f"Error cargando encuestas: {e}")
