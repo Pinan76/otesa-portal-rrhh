@@ -600,21 +600,25 @@ with tab6:
     st.subheader("Resultados de Encuestas")
 
     try:
-        resp_encuestas = supabase.table("encuestas") \
-            .select("id, titulo, descripcion, fecha_fin, estado") \
+        resp_encuestas = supabase.table("publicaciones") \
+            .select("id, titulo, contenido, fecha_limite, activo") \
             .eq("empresa_id", empresa_id) \
+            .eq("tipo", "ENCUESTA") \
             .order("created_at", desc=True) \
             .execute()
 
         if resp_encuestas.data:
             for encuesta in resp_encuestas.data:
-                with st.expander(f"📊 {encuesta['titulo']} — {encuesta['estado']}"):
-                    st.caption(encuesta.get("descripcion", ""))
-                    st.caption(f"Fecha de cierre: {encuesta.get('fecha_fin', 'Sin fecha')}")
+                estado_txt = "🟢 Activa" if encuesta.get("activo") else "🔴 Cerrada"
+                with st.expander(f"📊 {encuesta['titulo']} — {estado_txt}"):
+                    st.caption(encuesta.get("contenido", ""))
+                    fecha_lim = encuesta.get("fecha_limite", "")
+                    if fecha_lim:
+                        st.caption(f"Fecha límite: {fecha_lim[:10]}")
 
                     resp_votos = supabase.table("votos") \
-                        .select("voto, created_at, usuarios(nombre_completo, area, rfc_empleado)") \
-                        .eq("encuesta_id", encuesta["id"]) \
+                        .select("opcion_elegida, area, created_at, usuarios(nombre_completo, rfc_empleado)") \
+                        .eq("publicacion_id", encuesta["id"]) \
                         .execute()
 
                     if resp_votos.data:
@@ -622,10 +626,10 @@ with tab6:
                         for v in resp_votos.data:
                             usuario_data = v.get("usuarios") or {}
                             votos_lista.append({
-                                "Voto":       v["voto"],
+                                "Voto":       v.get("opcion_elegida", "-"),
                                 "Empleado":   usuario_data.get("nombre_completo", "Desconocido"),
                                 "RFC":        usuario_data.get("rfc_empleado", "-"),
-                                "Área":       usuario_data.get("area", "Sin área"),
+                                "Área":       v.get("area", "Sin área"),
                                 "Fecha Voto": v.get("created_at", "")[:10],
                             })
 
