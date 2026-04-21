@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================
 # OTESA - Portal Web de RRHH
-# Versión: 3.0 — Conectado a Supabase
+# Versión: 4.0 — Conectado a Supabase
 #
 # Funciones principales:
 #   1. Login con contraseña de admin
@@ -11,6 +11,7 @@
 #   5. Bitácora de envíos
 #   6. Alta de nuevo personal
 #   7. Resultados de encuestas (conteo + detalle por persona y depto)
+#   8. Mis Documentos (documentos personales subidos por empleados)
 # ============================================================
 
 import streamlit as st
@@ -53,7 +54,7 @@ if "admin" not in st.session_state:
     st.session_state.admin = False
 
 # ==========================================
-# FUNCIONES DE PROCESAMIENTO DE PDF
+# FUNCIONES
 # ==========================================
 def extraer_datos_pdf(pdf_bytes: bytes) -> dict:
     try:
@@ -138,8 +139,7 @@ def subir_pdf_storage(pdf_bytes: bytes, nombre_archivo: str) -> str | None:
             pdf_bytes,
             file_options={"content-type": "application/pdf", "upsert": "true"}
         )
-        url = supabase.storage.from_(BUCKET_RECIBOS).get_public_url(path)
-        return url
+        return supabase.storage.from_(BUCKET_RECIBOS).get_public_url(path)
     except Exception as e:
         st.error(f"Error subiendo {nombre_archivo}: {e}")
         return None
@@ -201,7 +201,6 @@ def enviar_alerta_resend(email_empleado: str, nombre_empleado: str, periodo: str
 
     resend_key = st.secrets.get("RESEND_KEY", "")
     if not resend_key:
-        st.error("No se encontró RESEND_KEY en secrets")
         return False
 
     payload = {
@@ -225,6 +224,10 @@ def enviar_alerta_resend(email_empleado: str, nombre_empleado: str, periodo: str
             return resp.status == 200
     except:
         return False
+
+
+def es_imagen(url: str) -> bool:
+    return any(url.lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".webp", ".gif"])
 
 
 # ==========================================
@@ -276,13 +279,14 @@ nombre_empresa = empresa["nombre_comercial"] if empresa else "Empresa"
 st.title(f"📋 Panel RRHH — {nombre_empresa}")
 st.divider()
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📂 Carga Masiva",
     "🚨 Estado de Firmas",
     "📧 Alertas",
     "📊 Bitácora",
     "👤 Alta de Personal",
-    "🗳️ Encuestas"
+    "🗳️ Encuestas",
+    "📁 Mis Documentos",
 ])
 
 # ==========================================
@@ -528,7 +532,7 @@ with tab5:
                         .execute()
 
                     if check.data:
-                        st.error(f"⚠️ El RFC {rfc_nuevo.upper()} ya está registrado en el sistema.")
+                        st.error(f"⚠️ El RFC {rfc_nuevo.upper()} ya está registrado.")
                     else:
                         nuevo_usuario = {
                             "empresa_id":      empresa_id,
@@ -540,7 +544,6 @@ with tab5:
                             "es_admin":        es_admin,
                             "estado":          "ACTIVO",
                         }
-
                         if curp_nuevo:
                             nuevo_usuario["curp"] = curp_nuevo.upper().strip()
                         if nss_nuevo:
@@ -555,7 +558,6 @@ with tab5:
                             st.info("📱 El empleado podrá registrarse en la app usando su RFC.")
                         else:
                             st.error("❌ Error al registrar el empleado.")
-
                 except Exception as e:
                     st.error(f"Error: {e}")
 
@@ -668,3 +670,78 @@ with tab6:
             st.info("No hay encuestas registradas para esta empresa.")
     except Exception as e:
         st.error(f"Error cargando encuestas: {e}")
+
+
+# ==========================================
+# TAB 7 — MIS DOCUMENTOS
+# ==========================================
+with tab7:
+    st.subheader("Documentos personales de empleados")
+    st.caption("Documentos subidos por los empleados desde la app (PDFs e imágenes).")
+
+    try:
+        # Obtener todos los documentos personales con datos del empleado
+        resp_docs = supabase.table("publicaciones") \
+            .select("id, titulo, archivo_url, created_at, activo, empleado_id, usuarios!empleado_id(nombre_completo, rfc_empleado, area)") \
+            .eq("empresa_id", empresa_id) \
+            .eq("tipo", "DOCUMENTO_PERSONAL") \
+            .order("created_at", desc=True) \
+            .execute()
+
+        if resp_docs.data:
+            # Construir dataframe
+            docs_lista = []
+            for doc in resp_docs.data:
+                usuario_data = doc.get("usuarios") or {}
+                docs_lista.append({
+                    "id":       doc["id"],
+                    "Empleado": usuario_data.get("nombre_completo", "Desconocido"),
+                    "RFC":      usuario_data.get("rfc_empleado", "-"),
+                    "Área":     usuario_data.get("area", "-"),
+                    "Título":   doc.get("titulo", "Sin título"),
+                    "Fecha":    doc.get("created_at", "")[:10],
+                    "URL":      doc.get("archivo_url", ""),
+                })
+
+            df_docs = pd.DataFrame(docs_lista)
+
+            # Métricas
+            total_docs   = len(df_docs)
+            empleados_con_docs = df_docs["Empleado"].nunique()
+
+            m1, m2 = st.columns(2)
+            m1.metric("Total documentos", total_docs)
+            m2.metric("Empleados con documentos", empleados_con_docs)
+
+            st.divider()
+
+            # Filtro por empleado
+            empleados_lista = ["Todos"] + sorted(df_docs["Empleado"].unique().tolist())
+            filtro_empleado = st.selectbox("Filtrar por empleado", empleados_lista)
+
+            if filtro_empleado != "Todos":
+                df_docs = df_docs[df_docs["Empleado"] == filtro_empleado]
+
+            # Mostrar documentos
+            for _, row in df_docs.iterrows():
+                with st.expander(f"📄 {row['Título']} — {row['Empleado']} ({row['Fecha']})"):
+                    col1, col2 = st.columns([2, 1])
+                    with col2:
+                        st.write(f"**Empleado:** {row['Empleado']}")
+                        st.write(f"**RFC:** {row['RFC']}")
+                        st.write(f"**Área:** {row['Área']}")
+                        st.write(f"**Fecha:** {row['Fecha']}")
+
+                    with col1:
+                        url = row["URL"]
+                        if url:
+                            if es_imagen(url):
+                                st.image(url, use_container_width=True)
+                            else:
+                                st.markdown(f"[📥 Abrir documento]({url})", unsafe_allow_html=True)
+                        else:
+                            st.warning("Sin archivo adjunto")
+        else:
+            st.info("No hay documentos personales subidos por los empleados.")
+    except Exception as e:
+        st.error(f"Error cargando documentos: {e}")
