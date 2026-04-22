@@ -73,6 +73,10 @@ supabase = get_supabase()
 if "admin" not in st.session_state:
     st.session_state.admin = False
 
+# CAMBIO 1: key dinámica para el uploader de recibos
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0
+
 # ==========================================
 # FUNCIONES
 # ==========================================
@@ -315,10 +319,12 @@ with tab1:
     st.subheader("Carga masiva de recibos de nómina")
     st.caption("Sube los PDFs generados por CONTPAQi. El sistema asignará cada recibo al empleado correspondiente automáticamente.")
 
+    # CAMBIO 2: key dinámica en el uploader
     uploaded_files = st.file_uploader(
         "Selecciona los PDFs de nómina",
         type=["pdf"],
-        accept_multiple_files=True
+        accept_multiple_files=True,
+        key=f"uploader_{st.session_state.uploader_key}"
     )
 
     if uploaded_files:
@@ -384,6 +390,11 @@ with tab1:
 
             status.text("✅ Proceso completado")
             st.dataframe(pd.DataFrame(resultados), use_container_width=True)
+
+            # CAMBIO 3: botón para limpiar archivos procesados
+            if st.button("🧹 Limpiar archivos procesados"):
+                st.session_state.uploader_key += 1
+                st.rerun()
 
 
 # ==========================================
@@ -540,7 +551,6 @@ with tab5:
         submitted = st.form_submit_button("👤 Registrar Empleado", type="primary")
 
         if submitted:
-            # Email ya no es obligatorio
             if not nombre_completo or not rfc_nuevo or not area_nueva:
                 st.error("⚠️ Los campos marcados con * son obligatorios.")
             else:
@@ -563,7 +573,6 @@ with tab5:
                             "es_admin":        es_admin,
                             "estado":          "ACTIVO",
                         }
-                        # Email solo si fue proporcionado
                         if email_nuevo and email_nuevo.strip():
                             nuevo_usuario["email"] = email_nuevo.lower().strip()
                         if curp_nuevo:
@@ -626,7 +635,6 @@ with tab5:
                     email  = str(fila.get("email", "")).lower().strip()
                     area   = str(fila.get("area", "")).upper().strip()
 
-                    # Email ya NO es obligatorio
                     if not rfc or not nombre or not area:
                         resultados_masivos.append({
                             "Nombre": nombre,
@@ -660,7 +668,6 @@ with tab5:
                         "es_admin":        False,
                         "estado":          "ACTIVO",
                     }
-                    # Email solo si existe y no está vacío
                     if email and email != "nan":
                         nuevo["email"] = email
                     if pd.notna(fila.get("curp")) and str(fila.get("curp", "")).strip():
