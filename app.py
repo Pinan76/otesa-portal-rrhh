@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # ============================================================
 # OTESA - Portal Web de RRHH
-# Versión: 4.0 — Conectado a Supabase
+# Versión: 5.0 — Conectado a Supabase
 #
 # Funciones principales:
 #   1. Login con contraseña de admin
@@ -9,7 +9,7 @@
 #   3. Panel de estado de firmas
 #   4. Envío de alertas a empleados pendientes
 #   5. Bitácora de envíos
-#   6. Alta de nuevo personal
+#   6. Alta de nuevo personal (email opcional)
 #   7. Resultados de encuestas (conteo + detalle por persona y depto)
 #   8. Mis Documentos (documentos personales subidos por empleados)
 # ============================================================
@@ -18,9 +18,29 @@ import streamlit as st
 import pandas as pd
 import re
 import io
+import threading
+import time
+import urllib.request
 from datetime import datetime
 from pypdf import PdfReader
 from supabase import create_client, Client
+
+# ==========================================
+# HEARTBEAT — mantiene la app despierta
+# ==========================================
+def _heartbeat():
+    while True:
+        time.sleep(300)  # cada 5 minutos
+        try:
+            urllib.request.urlopen(
+                "https://otesa-app-rrhh-ojgssfmvavqwddbdtkt7ut.streamlit.app",
+                timeout=10
+            )
+        except:
+            pass
+
+_hb_thread = threading.Thread(target=_heartbeat, daemon=True)
+_hb_thread.start()
 
 # ==========================================
 # CONFIGURACIÓN
@@ -196,7 +216,6 @@ def obtener_status_recibos(empresa_id: str) -> pd.DataFrame:
 
 
 def enviar_alerta_resend(email_empleado: str, nombre_empleado: str, periodo: str) -> bool:
-    import urllib.request
     import json
 
     resend_key = st.secrets.get("RESEND_KEY", "")
@@ -498,7 +517,7 @@ with tab4:
 # ==========================================
 with tab5:
     st.subheader("Alta de nuevo personal")
-    st.caption("Registra nuevos empleados en el sistema. Podrán registrarse en la app usando su RFC.")
+    st.caption("Registra nuevos empleados en el sistema. El email es opcional — el empleado lo captura al registrarse en la app.")
 
     with st.form("form_alta_personal"):
         col1, col2 = st.columns(2)
@@ -506,7 +525,7 @@ with tab5:
         with col1:
             nombre_completo = st.text_input("Nombre completo *", placeholder="JUAN PEREZ GARCIA")
             rfc_nuevo       = st.text_input("RFC *", placeholder="PEGJ800101ABC")
-            email_nuevo     = st.text_input("Correo electrónico *", placeholder="juan@ejemplo.com")
+            email_nuevo     = st.text_input("Correo electrónico (opcional)", placeholder="juan@ejemplo.com")
             area_nueva      = st.text_input("Área / Departamento *", placeholder="PRODUCCION")
 
         with col2:
@@ -521,7 +540,8 @@ with tab5:
         submitted = st.form_submit_button("👤 Registrar Empleado", type="primary")
 
         if submitted:
-            if not nombre_completo or not rfc_nuevo or not email_nuevo or not area_nueva:
+            # Email ya no es obligatorio
+            if not nombre_completo or not rfc_nuevo or not area_nueva:
                 st.error("⚠️ Los campos marcados con * son obligatorios.")
             else:
                 try:
@@ -538,12 +558,14 @@ with tab5:
                             "empresa_id":      empresa_id,
                             "nombre_completo": nombre_completo.upper().strip(),
                             "rfc_empleado":    rfc_nuevo.upper().strip(),
-                            "email":           email_nuevo.lower().strip(),
                             "area":            area_nueva.upper().strip(),
                             "rol":             rol_nuevo,
                             "es_admin":        es_admin,
                             "estado":          "ACTIVO",
                         }
+                        # Email solo si fue proporcionado
+                        if email_nuevo and email_nuevo.strip():
+                            nuevo_usuario["email"] = email_nuevo.lower().strip()
                         if curp_nuevo:
                             nuevo_usuario["curp"] = curp_nuevo.upper().strip()
                         if nss_nuevo:
@@ -563,9 +585,8 @@ with tab5:
 
     st.divider()
     st.subheader("Carga masiva de personal")
-    st.caption("Sube un archivo Excel o CSV con los datos de todos los empleados de una vez.")
+    st.caption("Sube un archivo Excel o CSV. El email es opcional — los empleados lo capturan al registrarse en la app.")
 
-    # Botón para descargar plantilla
     plantilla = pd.DataFrame(columns=[
         "nombre_completo", "rfc_empleado", "email", "area",
         "puesto", "curp", "nss", "rol"
@@ -605,16 +626,16 @@ with tab5:
                     email  = str(fila.get("email", "")).lower().strip()
                     area   = str(fila.get("area", "")).upper().strip()
 
-                    if not rfc or not nombre or not email or not area:
+                    # Email ya NO es obligatorio
+                    if not rfc or not nombre or not area:
                         resultados_masivos.append({
                             "Nombre": nombre,
                             "RFC":    rfc,
-                            "Estado": "⚠️ Faltan campos obligatorios"
+                            "Estado": "⚠️ Faltan campos obligatorios (nombre, RFC, área)"
                         })
                         progress.progress((i + 1) / total)
                         continue
 
-                    # Verificar si ya existe
                     check = supabase.table("usuarios") \
                         .select("id") \
                         .eq("rfc_empleado", rfc) \
@@ -630,17 +651,18 @@ with tab5:
                         progress.progress((i + 1) / total)
                         continue
 
-                    # Insertar empleado
                     nuevo = {
                         "empresa_id":      empresa_id,
                         "nombre_completo": nombre,
                         "rfc_empleado":    rfc,
-                        "email":           email,
                         "area":            area,
                         "rol":             str(fila.get("rol", "empleado")).lower().strip() or "empleado",
                         "es_admin":        False,
                         "estado":          "ACTIVO",
                     }
+                    # Email solo si existe y no está vacío
+                    if email and email != "nan":
+                        nuevo["email"] = email
                     if pd.notna(fila.get("curp")) and str(fila.get("curp", "")).strip():
                         nuevo["curp"] = str(fila["curp"]).upper().strip()
                     if pd.notna(fila.get("nss")) and str(fila.get("nss", "")).strip():
@@ -798,7 +820,6 @@ with tab7:
             .execute()
 
         if resp_docs.data:
-            # Obtener datos de empleados en una sola consulta
             empleado_ids = list({doc["empleado_id"] for doc in resp_docs.data if doc.get("empleado_id")})
             resp_usuarios = supabase.table("usuarios") \
                 .select("id, nombre_completo, rfc_empleado, area") \
