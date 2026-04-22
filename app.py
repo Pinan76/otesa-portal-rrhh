@@ -608,7 +608,7 @@ with tab5:
     if archivo_masivo:
         try:
             if archivo_masivo.name.endswith(".csv"):
-                df_nuevos = pd.read_csv(archivo_masivo)
+                df_nuevos = pd.read_csv(archivo_masivo, encoding='latin-1')
             else:
                 df_nuevos = pd.read_excel(archivo_masivo)
 
