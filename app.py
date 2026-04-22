@@ -319,7 +319,11 @@ with tab1:
     st.subheader("Carga masiva de recibos de nómina")
     st.caption("Sube los PDFs generados por CONTPAQi. El sistema asignará cada recibo al empleado correspondiente automáticamente.")
 
-    # CAMBIO 2: key dinámica en el uploader
+    # Botón para limpiar el uploader
+    if st.button("🧹 Limpiar archivos"):
+        st.session_state.uploader_key += 1
+        st.rerun()
+
     uploaded_files = st.file_uploader(
         "Selecciona los PDFs de nómina",
         type=["pdf"],
@@ -390,11 +394,6 @@ with tab1:
 
             status.text("✅ Proceso completado")
             st.dataframe(pd.DataFrame(resultados), use_container_width=True)
-
-            # CAMBIO 3: botón para limpiar archivos procesados
-            if st.button("🧹 Limpiar archivos procesados"):
-                st.session_state.uploader_key += 1
-                st.rerun()
 
 
 # ==========================================
