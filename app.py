@@ -1,27 +1,29 @@
 # -*- coding: utf-8 -*-
 # ============================================================
 # OTESA - Portal Web de RRHH
-# Versión: 5.0 — Conectado a Supabase
+# Versión: 6.0 — Conectado a Supabase + OneSignal
 #
 # Funciones principales:
 #   1. Login con contraseña de admin
-#   2. Carga masiva de PDFs de nómina
+#   2. Carga masiva de PDFs de nómina + notificación push
 #   3. Panel de estado de firmas
 #   4. Envío de alertas a empleados pendientes
 #   5. Bitácora de envíos
 #   6. Alta de nuevo personal (email opcional)
-#   7. Resultados de encuestas (conteo + detalle por persona y depto)
-#   8. Mis Documentos (documentos personales subidos por empleados)
+#   7. Resultados de encuestas
+#   8. Mis Documentos
+#   9. Publicaciones (Avisos, Encuestas, Documentos)
 # ============================================================
 
 import streamlit as st
 import pandas as pd
 import re
 import io
+import json
 import threading
 import time
 import urllib.request
-from datetime import datetime
+from datetime import datetime, date
 from pypdf import PdfReader
 from supabase import create_client, Client
 
@@ -30,7 +32,7 @@ from supabase import create_client, Client
 # ==========================================
 def _heartbeat():
     while True:
-        time.sleep(300)  # cada 5 minutos
+        time.sleep(300)
         try:
             urllib.request.urlopen(
                 "https://otesa-app-rrhh-ojgssfmvavqwddbdtkt7ut.streamlit.app",
@@ -45,12 +47,14 @@ _hb_thread.start()
 # ==========================================
 # CONFIGURACIÓN
 # ==========================================
-SUPABASE_URL       = "https://msiulyfrohijawawwmrf.supabase.co"
-SUPABASE_KEY       = st.secrets["SUPABASE_SERVICE_KEY"]
-PASSWORD_ADMIN     = st.secrets["PASSWORD_ADMIN"]
-RFC_EMPRESA        = "OTE2107019N1"
-BUCKET_RECIBOS     = "recibos-nomina"
-CARPETA_ORIGINALES = "originales"
+SUPABASE_URL        = "https://msiulyfrohijawawwmrf.supabase.co"
+SUPABASE_KEY        = st.secrets["SUPABASE_SERVICE_KEY"]
+PASSWORD_ADMIN      = st.secrets["PASSWORD_ADMIN"]
+RFC_EMPRESA         = "OTE2107019N1"
+BUCKET_RECIBOS      = "recibos-nomina"
+CARPETA_ORIGINALES  = "originales"
+ONESIGNAL_APP_ID    = st.secrets.get("ONESIGNAL_APP_ID", "")
+ONESIGNAL_API_KEY   = st.secrets.get("ONESIGNAL_API_KEY", "")
 
 st.set_page_config(
     page_title="OTESA - Portal RRHH",
@@ -72,14 +76,37 @@ supabase = get_supabase()
 # ==========================================
 if "admin" not in st.session_state:
     st.session_state.admin = False
-
-# CAMBIO 1: key dinámica para el uploader de recibos
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
 
 # ==========================================
 # FUNCIONES
 # ==========================================
+def enviar_notificacion_onesignal(titulo: str, mensaje: str, segmento: str = "All") -> bool:
+    if not ONESIGNAL_APP_ID or not ONESIGNAL_API_KEY:
+        return False
+    payload = {
+        "app_id":            ONESIGNAL_APP_ID,
+        "included_segments": [segmento],
+        "headings":          {"es": titulo, "en": titulo},
+        "contents":          {"es": mensaje, "en": mensaje},
+    }
+    req = urllib.request.Request(
+        "https://onesignal.com/api/v1/notifications",
+        data=json.dumps(payload).encode(),
+        headers={
+            "Content-Type":  "application/json",
+            "Authorization": f"Basic {ONESIGNAL_API_KEY}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return resp.status == 200
+    except:
+        return False
+
+
 def extraer_datos_pdf(pdf_bytes: bytes) -> dict:
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
@@ -220,8 +247,6 @@ def obtener_status_recibos(empresa_id: str) -> pd.DataFrame:
 
 
 def enviar_alerta_resend(email_empleado: str, nombre_empleado: str, periodo: str) -> bool:
-    import json
-
     resend_key = st.secrets.get("RESEND_KEY", "")
     if not resend_key:
         return False
@@ -249,8 +274,35 @@ def enviar_alerta_resend(email_empleado: str, nombre_empleado: str, periodo: str
         return False
 
 
+def subir_archivo_publicaciones(archivo_bytes: bytes, nombre_archivo: str, content_type: str) -> str | None:
+    try:
+        path = f"publicaciones/{nombre_archivo}"
+        supabase.storage.from_("publicaciones").upload(
+            path,
+            archivo_bytes,
+            file_options={"content-type": content_type, "upsert": "true"}
+        )
+        return supabase.storage.from_("publicaciones").get_public_url(path)
+    except Exception as e:
+        st.error(f"Error subiendo archivo: {e}")
+        return None
+
+
 def es_imagen(url: str) -> bool:
     return any(url.lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".webp", ".gif"])
+
+
+def obtener_areas(empresa_id: str) -> list:
+    try:
+        resp = supabase.table("usuarios") \
+            .select("area") \
+            .eq("empresa_id", empresa_id) \
+            .eq("estado", "ACTIVO") \
+            .execute()
+        areas = sorted(list(set([u["area"] for u in resp.data if u.get("area")])))
+        return areas
+    except:
+        return []
 
 
 # ==========================================
@@ -302,7 +354,7 @@ nombre_empresa = empresa["nombre_comercial"] if empresa else "Empresa"
 st.title(f"📋 Panel RRHH — {nombre_empresa}")
 st.divider()
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "📂 Carga Masiva",
     "🚨 Estado de Firmas",
     "📧 Alertas",
@@ -310,6 +362,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "👤 Alta de Personal",
     "🗳️ Encuestas",
     "📁 Mis Documentos",
+    "📢 Publicaciones",
 ])
 
 # ==========================================
@@ -319,7 +372,6 @@ with tab1:
     st.subheader("Carga masiva de recibos de nómina")
     st.caption("Sube los PDFs generados por CONTPAQi. El sistema asignará cada recibo al empleado correspondiente automáticamente.")
 
-    # Botón para limpiar el uploader
     if st.button("🧹 Limpiar archivos"):
         st.session_state.uploader_key += 1
         st.rerun()
@@ -334,7 +386,23 @@ with tab1:
     if uploaded_files:
         st.info(f"📄 {len(uploaded_files)} archivo(s) seleccionado(s)")
 
-        if st.button("🚀 Procesar y Subir Recibos", type="primary"):
+        col_btn1, col_btn2 = st.columns([2, 1])
+        with col_btn1:
+            procesar = st.button("🚀 Procesar y Subir Recibos", type="primary")
+        with col_btn2:
+            notificar = st.button("🔔 Notificar Empleados")
+
+        if notificar:
+            ok = enviar_notificacion_onesignal(
+                "📄 Nuevo recibo de nómina",
+                "Tienes un recibo de nómina pendiente de firma. Ábrelo en la app OTESA Nómina."
+            )
+            if ok:
+                st.success("✅ Notificación enviada a todos los empleados")
+            else:
+                st.error("❌ Error al enviar notificación")
+
+        if procesar:
             resultados = []
             progress   = st.progress(0)
             status     = st.empty()
@@ -394,6 +462,19 @@ with tab1:
 
             status.text("✅ Proceso completado")
             st.dataframe(pd.DataFrame(resultados), use_container_width=True)
+
+            exitosos = sum(1 for r in resultados if "✅" in r["Estado"])
+            if exitosos > 0:
+                st.divider()
+                if st.button("🔔 Notificar a empleados que tienen nuevo recibo", type="primary"):
+                    ok = enviar_notificacion_onesignal(
+                        "📄 Nuevo recibo de nómina",
+                        f"Tienes {exitosos} recibo(s) de nómina pendiente(s) de firma. Ábrelos en la app OTESA Nómina."
+                    )
+                    if ok:
+                        st.success("✅ Notificación push enviada a todos los empleados")
+                    else:
+                        st.error("❌ Error al enviar notificación push")
 
 
 # ==========================================
@@ -464,35 +545,45 @@ with tab3:
 
             st.divider()
 
-            if st.button("📧 Enviar Alerta a Todos los Pendientes", type="primary"):
-                enviados = 0
-                errores  = 0
+            col_a1, col_a2 = st.columns(2)
+            with col_a1:
+                if st.button("📧 Enviar Alerta por Email", type="primary"):
+                    enviados = 0
+                    errores  = 0
+                    for _, row in pendientes_df.iterrows():
+                        try:
+                            resp = supabase.table("usuarios") \
+                                .select("email, nombre_completo") \
+                                .eq("rfc_empleado", row["rfc"]) \
+                                .eq("empresa_id", empresa_id) \
+                                .single() \
+                                .execute()
+                            if resp.data and resp.data.get("email"):
+                                ok = enviar_alerta_resend(
+                                    resp.data["email"],
+                                    resp.data["nombre_completo"],
+                                    row["periodo"]
+                                )
+                                if ok:
+                                    enviados += 1
+                                else:
+                                    errores += 1
+                        except:
+                            errores += 1
+                    st.success(f"✅ {enviados} email(s) enviado(s)")
+                    if errores:
+                        st.error(f"❌ {errores} error(es)")
 
-                for _, row in pendientes_df.iterrows():
-                    try:
-                        resp = supabase.table("usuarios") \
-                            .select("email, nombre_completo") \
-                            .eq("rfc_empleado", row["rfc"]) \
-                            .eq("empresa_id", empresa_id) \
-                            .single() \
-                            .execute()
-
-                        if resp.data and resp.data.get("email"):
-                            ok = enviar_alerta_resend(
-                                resp.data["email"],
-                                resp.data["nombre_completo"],
-                                row["periodo"]
-                            )
-                            if ok:
-                                enviados += 1
-                            else:
-                                errores += 1
-                    except:
-                        errores += 1
-
-                st.success(f"✅ {enviados} alerta(s) enviada(s)")
-                if errores:
-                    st.error(f"❌ {errores} error(es) al enviar")
+            with col_a2:
+                if st.button("🔔 Enviar Notificación Push", type="primary"):
+                    ok = enviar_notificacion_onesignal(
+                        "⚠️ Recibo pendiente de firma",
+                        "Tienes un recibo de nómina pendiente. Fírmalo ahora en la app OTESA Nómina."
+                    )
+                    if ok:
+                        st.success("✅ Notificación push enviada")
+                    else:
+                        st.error("❌ Error al enviar notificación push")
         else:
             st.success("✅ Todos los empleados han firmado sus recibos.")
     else:
@@ -789,13 +880,11 @@ with tab6:
                             st.dataframe(conteo, use_container_width=True, hide_index=True)
 
                         st.divider()
-
                         st.markdown("**Votos por Departamento**")
                         df_depto = df_votos.groupby(["Área", "Voto"]).size().reset_index(name="Cantidad")
                         st.dataframe(df_depto, use_container_width=True, hide_index=True)
 
                         st.divider()
-
                         st.markdown("**Detalle por Persona**")
                         st.dataframe(
                             df_votos[["Empleado", "RFC", "Área", "Voto", "Fecha Voto"]],
@@ -881,3 +970,261 @@ with tab7:
             st.info("No hay documentos personales subidos por los empleados.")
     except Exception as e:
         st.error(f"Error cargando documentos: {e}")
+
+
+# ==========================================
+# TAB 8 — PUBLICACIONES
+# ==========================================
+with tab8:
+    st.subheader("Gestión de Publicaciones")
+    st.caption("Crea avisos, encuestas y sube documentos para tus empleados.")
+
+    areas_disponibles = obtener_areas(empresa_id)
+
+    subtab1, subtab2, subtab3, subtab4 = st.tabs([
+        "📣 Nuevo Aviso",
+        "📋 Nueva Encuesta",
+        "📎 Subir Documento",
+        "📂 Publicaciones Activas",
+    ])
+
+    # ---- SUBTAB 1: NUEVO AVISO ----
+    with subtab1:
+        st.markdown("### Crear nuevo aviso")
+        with st.form("form_nuevo_aviso"):
+            titulo_aviso    = st.text_input("Título del aviso *", placeholder="Junta de seguridad el viernes")
+            contenido_aviso = st.text_area("Contenido *", placeholder="Estimados colaboradores...", height=150)
+
+            col1, col2 = st.columns(2)
+            with col1:
+                area_aviso = st.selectbox(
+                    "Área destino",
+                    ["Todos"] + areas_disponibles,
+                    help="Selecciona 'Todos' para que lo vean todos los empleados"
+                )
+            with col2:
+                fecha_limite_aviso = st.date_input(
+                    "Fecha límite (opcional)",
+                    value=None,
+                    help="Deja vacío si no tiene fecha de expiración"
+                )
+
+            notif_aviso = st.checkbox("🔔 Enviar notificación push al publicar", value=True)
+            submit_aviso = st.form_submit_button("📣 Publicar Aviso", type="primary")
+
+            if submit_aviso:
+                if not titulo_aviso or not contenido_aviso:
+                    st.error("⚠️ El título y contenido son obligatorios.")
+                else:
+                    try:
+                        nuevo_aviso = {
+                            "empresa_id":  empresa_id,
+                            "tipo":        "AVISO",
+                            "titulo":      titulo_aviso.strip(),
+                            "contenido":   contenido_aviso.strip(),
+                            "activo":      True,
+                            "area_destino": None if area_aviso == "Todos" else area_aviso,
+                        }
+                        if fecha_limite_aviso:
+                            nuevo_aviso["fecha_limite"] = fecha_limite_aviso.isoformat()
+
+                        resp_aviso = supabase.table("publicaciones").insert(nuevo_aviso).execute()
+
+                        if resp_aviso.data:
+                            st.success(f"✅ Aviso **{titulo_aviso}** publicado correctamente.")
+                            if notif_aviso:
+                                ok = enviar_notificacion_onesignal(
+                                    f"📣 {titulo_aviso}",
+                                    contenido_aviso[:100] + "..." if len(contenido_aviso) > 100 else contenido_aviso
+                                )
+                                if ok:
+                                    st.info("🔔 Notificación push enviada a los empleados.")
+                                else:
+                                    st.warning("⚠️ Aviso publicado pero no se pudo enviar la notificación push.")
+                        else:
+                            st.error("❌ Error al publicar el aviso.")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+    # ---- SUBTAB 2: NUEVA ENCUESTA ----
+    with subtab2:
+        st.markdown("### Crear nueva encuesta")
+        with st.form("form_nueva_encuesta"):
+            titulo_enc    = st.text_input("Título de la encuesta *", placeholder="¿Cómo calificarías el comedor?")
+            contenido_enc = st.text_area("Descripción / Pregunta *", placeholder="Por favor responde con honestidad...", height=100)
+
+            st.markdown("**Opciones de respuesta** (mínimo 2)")
+            op1 = st.text_input("Opción 1 *", placeholder="Excelente")
+            op2 = st.text_input("Opción 2 *", placeholder="Bueno")
+            op3 = st.text_input("Opción 3 (opcional)", placeholder="Regular")
+            op4 = st.text_input("Opción 4 (opcional)", placeholder="Malo")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                area_enc = st.selectbox(
+                    "Área destino",
+                    ["Todos"] + areas_disponibles
+                )
+            with col2:
+                fecha_limite_enc = st.date_input("Fecha límite *", value=date.today())
+
+            notif_enc = st.checkbox("🔔 Enviar notificación push al publicar", value=True)
+            submit_enc = st.form_submit_button("📋 Publicar Encuesta", type="primary")
+
+            if submit_enc:
+                if not titulo_enc or not contenido_enc or not op1 or not op2:
+                    st.error("⚠️ Título, descripción y al menos 2 opciones son obligatorios.")
+                else:
+                    try:
+                        opciones = [op for op in [op1, op2, op3, op4] if op.strip()]
+                        nueva_enc = {
+                            "empresa_id":   empresa_id,
+                            "tipo":         "ENCUESTA",
+                            "titulo":       titulo_enc.strip(),
+                            "contenido":    contenido_enc.strip(),
+                            "opciones":     json.dumps(opciones),
+                            "activo":       True,
+                            "fecha_limite": fecha_limite_enc.isoformat(),
+                            "area_destino": None if area_enc == "Todos" else area_enc,
+                        }
+
+                        resp_enc = supabase.table("publicaciones").insert(nueva_enc).execute()
+
+                        if resp_enc.data:
+                            st.success(f"✅ Encuesta **{titulo_enc}** publicada correctamente.")
+                            if notif_enc:
+                                ok = enviar_notificacion_onesignal(
+                                    f"📋 Nueva encuesta: {titulo_enc}",
+                                    "Tu opinión importa. Responde la encuesta en la app OTESA Nómina."
+                                )
+                                if ok:
+                                    st.info("🔔 Notificación push enviada.")
+                                else:
+                                    st.warning("⚠️ Encuesta publicada pero no se pudo enviar la notificación push.")
+                        else:
+                            st.error("❌ Error al publicar la encuesta.")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+    # ---- SUBTAB 3: SUBIR DOCUMENTO ----
+    with subtab3:
+        st.markdown("### Subir documento para empleados")
+        st.caption("Sube PDFs o imágenes como Reglamento Interno, circulares, avisos con firma, etc.")
+
+        with st.form("form_subir_documento"):
+            titulo_doc  = st.text_input("Nombre del documento *", placeholder="Reglamento Interno 2026")
+            descripcion_doc = st.text_area("Descripción (opcional)", placeholder="Documento actualizado en enero 2026...", height=80)
+
+            col1, col2 = st.columns(2)
+            with col1:
+                area_doc = st.selectbox("Área destino", ["Todos"] + areas_disponibles)
+            with col2:
+                plan_doc = st.selectbox("Plan requerido", ["BASICO", "PREMIUM"])
+
+            archivo_doc = st.file_uploader(
+                "Selecciona el archivo *",
+                type=["pdf", "jpg", "jpeg", "png"],
+                help="PDF o imagen"
+            )
+
+            notif_doc = st.checkbox("🔔 Enviar notificación push al publicar", value=True)
+            submit_doc = st.form_submit_button("📎 Publicar Documento", type="primary")
+
+            if submit_doc:
+                if not titulo_doc or not archivo_doc:
+                    st.error("⚠️ El título y el archivo son obligatorios.")
+                else:
+                    try:
+                        archivo_bytes = archivo_doc.read()
+                        content_type  = archivo_doc.type
+                        nombre_unico  = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{archivo_doc.name}"
+
+                        url_doc = subir_archivo_publicaciones(archivo_bytes, nombre_unico, content_type)
+
+                        if url_doc:
+                            nuevo_doc = {
+                                "empresa_id":    empresa_id,
+                                "tipo":          "DOCUMENTO",
+                                "titulo":        titulo_doc.strip(),
+                                "contenido":     descripcion_doc.strip(),
+                                "archivo_url":   url_doc,
+                                "activo":        True,
+                                "area_destino":  None if area_doc == "Todos" else area_doc,
+                                "plan_requerido": plan_doc,
+                            }
+
+                            resp_doc = supabase.table("publicaciones").insert(nuevo_doc).execute()
+
+                            if resp_doc.data:
+                                st.success(f"✅ Documento **{titulo_doc}** publicado correctamente.")
+                                if notif_doc:
+                                    ok = enviar_notificacion_onesignal(
+                                        f"📎 Nuevo documento: {titulo_doc}",
+                                        "Se publicó un nuevo documento en la app OTESA Nómina."
+                                    )
+                                    if ok:
+                                        st.info("🔔 Notificación push enviada.")
+                                    else:
+                                        st.warning("⚠️ Documento publicado pero no se pudo enviar la notificación.")
+                            else:
+                                st.error("❌ Error al registrar el documento.")
+                        else:
+                            st.error("❌ Error al subir el archivo.")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+    # ---- SUBTAB 4: PUBLICACIONES ACTIVAS ----
+    with subtab4:
+        st.markdown("### Publicaciones activas")
+
+        if st.button("🔄 Actualizar lista"):
+            st.rerun()
+
+        try:
+            resp_pubs = supabase.table("publicaciones") \
+                .select("id, tipo, titulo, contenido, activo, created_at, area_destino, fecha_limite") \
+                .eq("empresa_id", empresa_id) \
+                .neq("tipo", "DOCUMENTO_PERSONAL") \
+                .order("created_at", desc=True) \
+                .execute()
+
+            if resp_pubs.data:
+                for pub in resp_pubs.data:
+                    tipo      = pub.get("tipo", "")
+                    activo    = pub.get("activo", False)
+                    emoji     = "📣" if tipo == "AVISO" else "📋" if tipo == "ENCUESTA" else "📎"
+                    estado    = "🟢 Activa" if activo else "🔴 Inactiva"
+                    area_txt  = pub.get("area_destino") or "Todos"
+
+                    with st.expander(f"{emoji} {pub['titulo']} — {estado} | Área: {area_txt}"):
+                        st.caption(f"Tipo: {tipo} | Creada: {pub['created_at'][:10]}")
+                        if pub.get("contenido"):
+                            st.write(pub["contenido"])
+                        if pub.get("fecha_limite"):
+                            st.caption(f"Fecha límite: {pub['fecha_limite'][:10]}")
+
+                        col_a, col_b, col_c = st.columns(3)
+                        with col_a:
+                            nuevo_estado = not activo
+                            label = "🔴 Desactivar" if activo else "🟢 Activar"
+                            if st.button(label, key=f"toggle_{pub['id']}"):
+                                supabase.table("publicaciones").update({"activo": nuevo_estado}).eq("id", pub["id"]).execute()
+                                st.rerun()
+                        with col_b:
+                            if st.button("🔔 Reenviar notif.", key=f"notif_{pub['id']}"):
+                                ok = enviar_notificacion_onesignal(
+                                    f"{emoji} {pub['titulo']}",
+                                    pub.get("contenido", "")[:100]
+                                )
+                                if ok:
+                                    st.success("✅ Notificación reenviada")
+                                else:
+                                    st.error("❌ Error al reenviar")
+                        with col_c:
+                            if st.button("🗑️ Eliminar", key=f"del_{pub['id']}"):
+                                supabase.table("publicaciones").delete().eq("id", pub["id"]).execute()
+                                st.rerun()
+            else:
+                st.info("No hay publicaciones registradas.")
+        except Exception as e:
+            st.error(f"Error cargando publicaciones: {e}")
