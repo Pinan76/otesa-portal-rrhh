@@ -96,7 +96,7 @@ def enviar_notificacion_onesignal(titulo: str, mensaje: str, segmento: str = "Al
         data=json.dumps(payload).encode(),
         headers={
             "Content-Type":  "application/json",
-            "Authorization": f"Basic {ONESIGNAL_API_KEY}",
+            "Authorization": f"Bearer {ONESIGNAL_API_KEY}",
         },
         method="POST",
     )
