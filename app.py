@@ -103,7 +103,11 @@ def enviar_notificacion_onesignal(titulo: str, mensaje: str, segmento: str = "Al
     try:
         with urllib.request.urlopen(req) as resp:
             return resp.status == 200
-    except:
+    except urllib.error.HTTPError as e:
+        st.error(f"OneSignal HTTP Error: {e.code} — {e.read().decode()}")
+        return False
+    except Exception as e:
+        st.error(f"OneSignal Error: {e}")
         return False
 
 
