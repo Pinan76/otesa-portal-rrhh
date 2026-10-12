@@ -590,7 +590,6 @@ with tab1:
             if exitosos > 0:
                 st.divider()
                 if st.button("🔔 Notificar a empleados que tienen nuevo recibo", type="primary"):
-                    ok_push, _ = True, None
                     ok_push = enviar_notificacion_onesignal(
                         "📄 Nuevo recibo de nómina",
                         f"Tienes {exitosos} recibo(s) de nómina pendiente(s) de firma. Ábrelos en la app OTESA Nómina."
