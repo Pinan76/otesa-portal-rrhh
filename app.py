@@ -1226,6 +1226,9 @@ with tab8:
                                     st.error("❌ Error al reenviar")
                         with col_c:
                             if st.button("🗑️ Eliminar", key=f"del_{pub['id']}"):
+                                # Primero eliminar votos asociados (evita FK constraint)
+                                supabase.table("votos").delete().eq("publicacion_id", pub["id"]).execute()
+                                # Luego eliminar la publicación
                                 supabase.table("publicaciones").delete().eq("id", pub["id"]).execute()
                                 st.rerun()
             else:
