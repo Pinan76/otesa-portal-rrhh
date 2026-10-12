@@ -114,8 +114,11 @@ def enviar_notificacion_onesignal(titulo: str, mensaje: str, segmento: str = "Al
 def extraer_datos_pdf(pdf_bytes: bytes) -> dict:
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
-        text   = reader.pages[0].extract_text()
-        lines  = text.split('\n')
+        # Leer todas las páginas por si el periodo está en la segunda
+        text = "\n".join(
+            page.extract_text() or "" for page in reader.pages
+        )
+        lines = text.split('\n')
 
         todos_rfcs = re.findall(r'[A-Z&Ñ]{3,4}\s*\d{6}\s*[A-Z0-9]{3}', text)
         rfc_final  = "DESCONOCIDO"
@@ -144,16 +147,61 @@ def extraer_datos_pdf(pdf_bytes: bytes) -> dict:
                             nombre_final = cand
                             break
 
-        semana  = 0
-        año     = datetime.now().year
-        periodo = ""
+        semana   = 0
+        año      = datetime.now().year
+        periodo  = ""
+        tipo_nom = "SEMANAL"   # SEMANAL | AGUINALDO | VACACIONES | ESPECIAL
 
-        match_periodo = re.search(r'Periodo:\s*(\d+)\s+\d+\s+Semanal\s+(\d{2}/\w+/\d{4})', text)
-        if match_periodo:
-            semana  = int(match_periodo.group(1))
-            fecha_s = match_periodo.group(2)
+        # ── Intentos de extracción del periodo ──────────────────────────
+        # Patrón 1 (CONTPAQi clásico): "Periodo: 41  41  Semanal  07/Oct/2026"
+        m = re.search(
+            r'Periodo[:\s]+(\d+)\s+\d+\s+Semanal\s+(\d{2}/\w+/\d{4})',
+            text, re.IGNORECASE
+        )
+        if m:
+            semana  = int(m.group(1))
+            fecha_s = m.group(2)
             año     = int(fecha_s.split("/")[-1])
             periodo = f"Semana_{semana}"
+
+        # Patrón 2 (variante sin espacio doble): "Periodo:41 41 Semanal 07/Oct/2026"
+        if not semana:
+            m = re.search(
+                r'Periodo[:\s]*(\d+)\s+\d*\s*Semanal\s+\d{2}/\w+/(\d{4})',
+                text, re.IGNORECASE
+            )
+            if m:
+                semana = int(m.group(1))
+                año    = int(m.group(2))
+                periodo = f"Semana_{semana}"
+
+        # Patrón 3: "Semana 41" o "Sem. 41" suelto en el texto
+        if not semana:
+            m = re.search(r'Sem(?:ana)?\.?\s*(\d{1,2})\b', text, re.IGNORECASE)
+            if m:
+                semana  = int(m.group(1))
+                periodo = f"Semana_{semana}"
+
+        # Patrón 4: Aguinaldo / PTU / Vacaciones (recibos especiales de fin de año)
+        if not semana:
+            if re.search(r'aguinaldo', text, re.IGNORECASE):
+                tipo_nom = "AGUINALDO"
+                semana   = 53          # Convención: semana 53 = aguinaldo
+                periodo  = f"Aguinaldo_{año}"
+            elif re.search(r'vacacion|vacation', text, re.IGNORECASE):
+                tipo_nom = "VACACIONES"
+                semana   = 54          # Convención: semana 54 = vacaciones
+                periodo  = f"Vacaciones_{año}"
+            elif re.search(r'prima vacacional', text, re.IGNORECASE):
+                tipo_nom = "PRIMA_VAC"
+                semana   = 55          # Convención: semana 55 = prima vacacional
+                periodo  = f"PrimaVac_{año}"
+
+        # Extraer año de cualquier fecha en el texto si aún no se obtuvo
+        if año == datetime.now().year and not semana:
+            m_año = re.search(r'\b(202[4-9]|203\d)\b', text)
+            if m_año:
+                año = int(m_año.group(1))
 
         monto = 0.0
         match_neto = re.search(r'Neto del recibo\s*\$\s*([\d,]+\.\d{2})', text)
@@ -161,12 +209,14 @@ def extraer_datos_pdf(pdf_bytes: bytes) -> dict:
             monto = float(match_neto.group(1).replace(",", ""))
 
         return {
-            "rfc":     rfc_final,
-            "nombre":  nombre_final,
-            "semana":  semana,
-            "año":     año,
-            "periodo": periodo,
-            "monto":   monto,
+            "rfc":      rfc_final,
+            "nombre":   nombre_final,
+            "semana":   semana,
+            "año":      año,
+            "periodo":  periodo,
+            "monto":    monto,
+            "tipo_nom": tipo_nom,
+            "texto_raw": text[:300],  # para debug en portal
         }
     except Exception as e:
         return {"error": str(e)}
@@ -200,24 +250,32 @@ def subir_pdf_storage(pdf_bytes: bytes, nombre_archivo: str) -> str | None:
         return None
 
 
-def crear_recibo_supabase(empresa_id: str, usuario_id: str, datos: dict, pdf_url: str, nombre_empleado: str) -> bool:
+def crear_recibo_supabase(empresa_id: str, usuario_id: str, datos: dict, pdf_url: str, nombre_empleado: str) -> tuple[bool, str]:
+    """
+    Retorna (éxito, mensaje).
+    Usa upsert para que re-subir un recibo de la misma semana actualice el PDF
+    en lugar de fallar con constraint de duplicado.
+    """
     try:
-        supabase.table("recibos").insert({
-            "empresa_id":      empresa_id,
-            "usuario_id":      usuario_id,
-            "periodo":         datos["periodo"],
-            "semana":          datos["semana"],
-            "año":             datos["año"],
-            "monto":           datos["monto"],
-            "pdf_url":         pdf_url,
-            "estado":          "PENDIENTE",
-            "nombre_empleado": nombre_empleado,
-            "rfc":             datos["rfc"],
-        }).execute()
-        return True
+        supabase.table("recibos").upsert(
+            {
+                "empresa_id":      empresa_id,
+                "usuario_id":      usuario_id,
+                "periodo":         datos["periodo"],
+                "semana":          datos["semana"],
+                "año":             datos["año"],
+                "monto":           datos["monto"],
+                "pdf_url":         pdf_url,
+                "estado":          "PENDIENTE",
+                "nombre_empleado": nombre_empleado,
+                "rfc":             datos["rfc"],
+            },
+            on_conflict="usuario_id,semana,año"   # actualiza si ya existe
+        ).execute()
+        return True, "ok"
     except Exception as e:
-        st.error(f"Error creando recibo: {e}")
-        return False
+        msg = str(e)
+        return False, msg
 
 
 def obtener_empresa(empresa_id: str) -> dict | None:
@@ -376,9 +434,33 @@ with tab1:
     st.subheader("Carga masiva de recibos de nómina")
     st.caption("Sube los PDFs generados por CONTPAQi. El sistema asignará cada recibo al empleado correspondiente automáticamente.")
 
-    if st.button("🧹 Limpiar archivos"):
-        st.session_state.uploader_key += 1
-        st.rerun()
+    # ── Último recibo subido ──────────────────────────────────────────
+    try:
+        resp_ultimo = supabase.table("recibos") \
+            .select("periodo, semana, año, nombre_empleado, estado, created_at") \
+            .eq("empresa_id", empresa_id) \
+            .order("created_at", desc=True) \
+            .limit(1) \
+            .execute()
+        if resp_ultimo.data:
+            u = resp_ultimo.data[0]
+            fecha_carga = u["created_at"][:10] if u.get("created_at") else "—"
+            st.info(
+                f"📌 **Último recibo subido:** {u.get('periodo','—')}  |  "
+                f"Empleado: {u.get('nombre_empleado','—')}  |  "
+                f"Estado: {u.get('estado','—')}  |  "
+                f"Fecha carga: {fecha_carga}"
+            )
+    except:
+        pass
+
+    col_limpiar, col_nota = st.columns([1, 3])
+    with col_limpiar:
+        if st.button("🧹 Limpiar archivos"):
+            st.session_state.uploader_key += 1
+            st.rerun()
+    with col_nota:
+        st.caption("ℹ️ Semanas 1–52 = nómina semanal  |  Semana 53 = Aguinaldo  |  Semana 54 = Vacaciones  |  Semana 55 = Prima Vacacional")
 
     uploaded_files = st.file_uploader(
         "Selecciona los PDFs de nómina",
@@ -422,6 +504,24 @@ with tab1:
                         "Estado":   "❌ Error al leer PDF",
                         "RFC":      "-",
                         "Empleado": "-",
+                        "Semana":   "-",
+                        "Período":  "-",
+                        "Monto":    "-",
+                    })
+                    continue
+
+                # ── Alerta si semana=0 (regex no encontró el periodo) ──
+                if datos["semana"] == 0:
+                    with st.expander(f"⚠️ {archivo.name} — No se detectó semana. Ver texto extraído"):
+                        st.text(datos.get("texto_raw", "Sin texto"))
+                    resultados.append({
+                        "Archivo":  archivo.name,
+                        "Estado":   "⚠️ No se detectó semana (revisar PDF)",
+                        "RFC":      datos["rfc"],
+                        "Empleado": datos["nombre"],
+                        "Semana":   "0 — sin detectar",
+                        "Período":  datos["periodo"] or "—",
+                        "Monto":    f"${datos['monto']:,.2f}",
                     })
                     continue
 
@@ -432,6 +532,9 @@ with tab1:
                         "Estado":   f"⚠️ RFC no encontrado: {datos['rfc']}",
                         "RFC":      datos["rfc"],
                         "Empleado": datos["nombre"],
+                        "Semana":   datos["semana"],
+                        "Período":  datos["periodo"],
+                        "Monto":    f"${datos['monto']:,.2f}",
                     })
                     continue
 
@@ -442,10 +545,13 @@ with tab1:
                         "Estado":   "❌ Error al subir a Storage",
                         "RFC":      datos["rfc"],
                         "Empleado": usuario["nombre_completo"],
+                        "Semana":   datos["semana"],
+                        "Período":  datos["periodo"],
+                        "Monto":    f"${datos['monto']:,.2f}",
                     })
                     continue
 
-                ok = crear_recibo_supabase(
+                ok, msg = crear_recibo_supabase(
                     empresa_id,
                     usuario["id"],
                     datos,
@@ -453,12 +559,17 @@ with tab1:
                     usuario["nombre_completo"]
                 )
 
+                estado_txt = "✅ Cargado correctamente"
+                if not ok:
+                    estado_txt = f"❌ Error al crear recibo: {msg[:80]}"
+
                 resultados.append({
                     "Archivo":  archivo.name,
-                    "Estado":   "✅ Cargado correctamente" if ok else "❌ Error al crear recibo",
+                    "Estado":   estado_txt,
                     "RFC":      datos["rfc"],
                     "Empleado": usuario["nombre_completo"],
                     "Semana":   datos["semana"],
+                    "Período":  datos["periodo"],
                     "Monto":    f"${datos['monto']:,.2f}",
                 })
 
@@ -468,14 +579,23 @@ with tab1:
             st.dataframe(pd.DataFrame(resultados), use_container_width=True)
 
             exitosos = sum(1 for r in resultados if "✅" in r["Estado"])
+            problemas = sum(1 for r in resultados if "⚠️" in r["Estado"])
+            errores   = sum(1 for r in resultados if "❌" in r["Estado"])
+
+            col_res1, col_res2, col_res3 = st.columns(3)
+            col_res1.metric("✅ Exitosos", exitosos)
+            col_res2.metric("⚠️ Advertencias", problemas)
+            col_res3.metric("❌ Errores", errores)
+
             if exitosos > 0:
                 st.divider()
                 if st.button("🔔 Notificar a empleados que tienen nuevo recibo", type="primary"):
-                    ok = enviar_notificacion_onesignal(
+                    ok_push, _ = True, None
+                    ok_push = enviar_notificacion_onesignal(
                         "📄 Nuevo recibo de nómina",
                         f"Tienes {exitosos} recibo(s) de nómina pendiente(s) de firma. Ábrelos en la app OTESA Nómina."
                     )
-                    if ok:
+                    if ok_push:
                         st.success("✅ Notificación push enviada a todos los empleados")
                     else:
                         st.error("❌ Error al enviar notificación push")
